@@ -78,6 +78,7 @@ void DiagoCG<T, Device>::diag_once(const ct::Tensor& prec_in,
     // Works for generalized eigenvalue problem (US pseudopotentials) as well
     //-------------------------------------------------------------------
     // phi_m = new psi::Psi<T, Device>(phi, 1, 1);
+    ModuleBase::timer::tick("DiagoCG", "setup_workspace");
     auto phi_m
         = std::move(ct::Tensor(ct::DataTypeToEnum<T>::value, ct::DeviceTypeToEnum<ct_Device>::value, {this->n_basis_}));
     // hphi.resize(this->n_basis_max_, ModuleBase::ZERO);
@@ -106,13 +107,16 @@ void DiagoCG<T, Device>::diag_once(const ct::Tensor& prec_in,
     // lagrange.resize(this->n_band, ModuleBase::ZERO);
     auto lagrange
         = std::move(ct::Tensor(ct::DataTypeToEnum<T>::value, ct::DeviceTypeToEnum<ct_Device>::value, {this->n_band_}));
+    ModuleBase::timer::tick("DiagoCG", "setup_workspace");
 
+    ModuleBase::timer::tick("DiagoCG", "setup_prec");
     auto prec = prec_in;
     if (prec.NumElements() == 0)
     {
         prec = ct::Tensor(ct::DataTypeToEnum<T>::value, ct::DeviceTypeToEnum<ct_Device>::value, {this->n_basis_});
         prec.set_value(static_cast<Real>(1.0));
     }
+    ModuleBase::timer::tick("DiagoCG", "setup_prec");
 
     ModuleBase::Memory::record("DiagoCG", this->n_basis_ * 10);
 
@@ -120,14 +124,24 @@ void DiagoCG<T, Device>::diag_once(const ct::Tensor& prec_in,
     auto eigen_pack = eigen.accessor<Real, 1>();
     for (int m = 0; m < this->n_band_; m++)
     {
+        ModuleBase::timer::tick("DiagoCG", "band_copy");
         phi_m.sync(psi[m]);
+        ModuleBase::timer::tick("DiagoCG", "band_copy");
         // copy psi_in into internal psi, m=0 has been done in Constructor
+        ModuleBase::timer::tick("DiagoCG", "spsi_phi_before_orth");
         this->spsi_func_(phi_m.data<T>(), sphi.data<T>(), this->n_basis_, 1); // sphi = S|psi(m)>
+        ModuleBase::timer::tick("DiagoCG", "spsi_phi_before_orth");
         this->schmit_orth(m, psi, sphi, phi_m);
+        ModuleBase::timer::tick("DiagoCG", "spsi_phi_after_orth");
         this->spsi_func_(phi_m.data<T>(), sphi.data<T>(), this->n_basis_, 1); // sphi = S|psi(m)>
+        ModuleBase::timer::tick("DiagoCG", "spsi_phi_after_orth");
+        ModuleBase::timer::tick("DiagoCG", "hpsi_phi");
         this->hpsi_func_(phi_m.data<T>(), hphi.data<T>(), this->n_basis_, 1); // hphi = H|psi(m)>
+        ModuleBase::timer::tick("DiagoCG", "hpsi_phi");
 
+        ModuleBase::timer::tick("DiagoCG", "eigen_dot");
         eigen_pack[m] = dot_real_op()(this->n_basis_, phi_m.data<T>(), hphi.data<T>());
+        ModuleBase::timer::tick("DiagoCG", "eigen_dot");
 
         int iter = 0;
         Real gg_last = 0.0;
@@ -150,8 +164,12 @@ void DiagoCG<T, Device>::diag_once(const ct::Tensor& prec_in,
                                 g0,
                                 cg); // Tensor&
 
+            ModuleBase::timer::tick("DiagoCG", "hpsi_cg");
             this->hpsi_func_(cg.data<T>(), pphi.data<T>(), this->n_basis_, 1);
+            ModuleBase::timer::tick("DiagoCG", "hpsi_cg");
+            ModuleBase::timer::tick("DiagoCG", "spsi_cg");
             this->spsi_func_(cg.data<T>(), scg.data<T>(), this->n_basis_, 1);
+            ModuleBase::timer::tick("DiagoCG", "spsi_cg");
 
             converged = this->update_psi(pphi,
                                          cg,
@@ -166,7 +184,9 @@ void DiagoCG<T, Device>::diag_once(const ct::Tensor& prec_in,
 
         } while (!converged && ++iter < pw_diag_nmax_);
 
+        ModuleBase::timer::tick("DiagoCG", "band_save");
         psi[m].sync(phi_m);
+        ModuleBase::timer::tick("DiagoCG", "band_save");
         if (!converged)
         {
             ++this->notconv_;
@@ -178,6 +198,7 @@ void DiagoCG<T, Device>::diag_once(const ct::Tensor& prec_in,
         // (this CAN and WILL happen in not-so-special cases)
         if (m > 0)
         {
+            ModuleBase::timer::tick("DiagoCG", "reorder_check");
             ModuleBase::GlobalFunc::NOTE("reorder bands!");
             if (eigen_pack[m] - eigen_pack[m - 1] < -2.0 * pw_diag_thr_)
             {
@@ -203,6 +224,7 @@ void DiagoCG<T, Device>::diag_once(const ct::Tensor& prec_in,
                 eigen_pack[ii] = e0;
                 psi[ii].sync(pphi);
             } // endif
+            ModuleBase::timer::tick("DiagoCG", "reorder_check");
         }     // end reorder
     }         // end m
 
@@ -219,6 +241,7 @@ void DiagoCG<T, Device>::calc_grad(const ct::Tensor& prec,
                                    ct::Tensor& sphi,
                                    ct::Tensor& pphi)
 {
+    ModuleBase::timer::tick("DiagoCG", "calc_grad");
     // for (int i = 0; i < this->n_basis_; i++)
     // {
     //     //(2) PH|psi>
@@ -228,15 +251,19 @@ void DiagoCG<T, Device>::calc_grad(const ct::Tensor& prec,
     // }
     // denghui replace this at 20221106
     // TODO: use GPU precondition to initialize CG class
+    ModuleBase::timer::tick("DiagoCG", "calc_grad_precond");
     ModuleBase::vector_div_vector_op<T, Device>()(this->n_basis_, grad.data<T>(), hphi.data<T>(), prec.data<Real>());
     ModuleBase::vector_div_vector_op<T, Device>()(this->n_basis_, pphi.data<T>(), sphi.data<T>(), prec.data<Real>());
+    ModuleBase::timer::tick("DiagoCG", "calc_grad_precond");
 
     // Update lambda !
     // (4) <psi|SPH|psi >
+    ModuleBase::timer::tick("DiagoCG", "calc_grad_lambda");
     const Real eh = ModuleBase::dot_real_op<T, Device>()(this->n_basis_, sphi.data<T>(), grad.data<T>());
     // (5) <psi|SPS|psi >
     const Real es = ModuleBase::dot_real_op<T, Device>()(this->n_basis_, sphi.data<T>(), pphi.data<T>());
     const Real lambda = eh / es;
+    ModuleBase::timer::tick("DiagoCG", "calc_grad_lambda");
 
     // Update g!
     // for (int i = 0; i < this->n_basis_; i++)
@@ -249,12 +276,15 @@ void DiagoCG<T, Device>::calc_grad(const ct::Tensor& prec,
     //     grad.data<T>()[i] -= lambda * this->pphi[i];
     // }
     // haozhihan replace this 2022-10-6
+    ModuleBase::timer::tick("DiagoCG", "calc_grad_update");
     ModuleBase::vector_add_vector_op<T, Device>()(this->n_basis_,
                                                   grad.data<T>(),
                                                   grad.data<T>(),
                                                   1.0,
                                                   pphi.data<T>(),
                                                   (-lambda));
+    ModuleBase::timer::tick("DiagoCG", "calc_grad_update");
+    ModuleBase::timer::tick("DiagoCG", "calc_grad");
 }
 
 template <typename T, typename Device>
@@ -264,7 +294,11 @@ void DiagoCG<T, Device>::orth_grad(const ct::Tensor& psi,
                                    ct::Tensor& scg,
                                    ct::Tensor& lagrange)
 {
+    ModuleBase::timer::tick("DiagoCG", "orth_grad");
+    ModuleBase::timer::tick("DiagoCG", "orth_grad_spsi");
     this->spsi_func_(grad.data<T>(), scg.data<T>(), this->n_basis_, 1); // scg = S|grad>
+    ModuleBase::timer::tick("DiagoCG", "orth_grad_spsi");
+    ModuleBase::timer::tick("DiagoCG", "orth_grad_lagrange");
     ModuleBase::gemv_op<T, Device>()('C',
                                      this->n_basis_,
                                      m,
@@ -276,12 +310,16 @@ void DiagoCG<T, Device>::orth_grad(const ct::Tensor& psi,
                                      this->zero_,
                                      lagrange.data<T>(),
                                      1);
+    ModuleBase::timer::tick("DiagoCG", "orth_grad_lagrange");
 
+    ModuleBase::timer::tick("DiagoCG", "orth_grad_reduce");
     Parallel_Reduce::reduce_pool(lagrange.data<T>(), m);
+    ModuleBase::timer::tick("DiagoCG", "orth_grad_reduce");
 
     // (3) orthogonal |g> and |scg> to all states (0~m-1)
     //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     // haozhihan replace 2022-10-07
+    ModuleBase::timer::tick("DiagoCG", "orth_grad_update_grad");
     ModuleBase::gemv_op<T, Device>()('N',
                                      this->n_basis_,
                                      m,
@@ -293,7 +331,9 @@ void DiagoCG<T, Device>::orth_grad(const ct::Tensor& psi,
                                      this->one_,
                                      grad.data<T>(),
                                      1);
+    ModuleBase::timer::tick("DiagoCG", "orth_grad_update_grad");
 
+    ModuleBase::timer::tick("DiagoCG", "orth_grad_update_scg");
     ModuleBase::gemv_op<T, Device>()('N',
                                      this->n_basis_,
                                      m,
@@ -305,6 +345,8 @@ void DiagoCG<T, Device>::orth_grad(const ct::Tensor& psi,
                                      this->one_,
                                      scg.data<T>(),
                                      1);
+    ModuleBase::timer::tick("DiagoCG", "orth_grad_update_scg");
+    ModuleBase::timer::tick("DiagoCG", "orth_grad");
 }
 
 template <typename T, typename Device>
@@ -319,14 +361,17 @@ void DiagoCG<T, Device>::calc_gamma_cg(const int& iter,
                                        ct::Tensor& g0,
                                        ct::Tensor& cg)
 {
+    ModuleBase::timer::tick("DiagoCG", "calc_gamma_cg");
     Real gg_inter;
     if (iter > 0)
     {
         // (1) Update gg_inter!
         // gg_inter = <g|g0>
         // Attention : the 'g' in g0 is getted last time
+        ModuleBase::timer::tick("DiagoCG", "calc_gamma_inter_dot");
         gg_inter
             = ModuleBase::dot_real_op<T, Device>()(this->n_basis_, grad.data<T>(), g0.data<T>()); // b means before
+        ModuleBase::timer::tick("DiagoCG", "calc_gamma_inter_dot");
     }
 
     // (2) Update for g0!
@@ -340,22 +385,29 @@ void DiagoCG<T, Device>::calc_gamma_cg(const int& iter,
     // }
     // denghui replace this 20221106
     // TODO: use GPU precondition instead
+    ModuleBase::timer::tick("DiagoCG", "calc_gamma_precond");
     ModuleBase::vector_mul_vector_op<T, Device>()(this->n_basis_, g0.data<T>(), scg.data<T>(), prec.data<Real>());
+    ModuleBase::timer::tick("DiagoCG", "calc_gamma_precond");
 
     // (3) Update gg_now!
     // gg_now = < g|P|scg > = < g|g0 >
+    ModuleBase::timer::tick("DiagoCG", "calc_gamma_now_dot");
     const Real gg_now = ModuleBase::dot_real_op<T, Device>()(this->n_basis_, grad.data<T>(), g0.data<T>());
+    ModuleBase::timer::tick("DiagoCG", "calc_gamma_now_dot");
 
     if (iter == 0)
     {
+        ModuleBase::timer::tick("DiagoCG", "calc_gamma_init_dir");
         // (40) gg_last first value : equal gg_now
         gg_last = gg_now;
         // (50) cg direction first value : |g>
         // |cg> = |g>
         cg.sync(grad);
+        ModuleBase::timer::tick("DiagoCG", "calc_gamma_init_dir");
     }
     else
     {
+        ModuleBase::timer::tick("DiagoCG", "calc_gamma_update_dir");
         // (4) Update gamma !
         REQUIRES_OK(gg_last != 0.0, "DiagoCG_New::calc_gamma_cg: gg_last is zero, which is not allowed!");
         const Real gamma = (gg_now - gg_inter) / gg_last;
@@ -386,7 +438,9 @@ void DiagoCG<T, Device>::calc_gamma_cg(const int& iter,
             pcg[i] -= norma * pphi_m[i];
         }*/
         ModuleBase::axpy_op<T, Device>()(this->n_basis_, &znorma, phi_m.data<T>(), 1, cg.data<T>(), 1);
+        ModuleBase::timer::tick("DiagoCG", "calc_gamma_update_dir");
     }
+    ModuleBase::timer::tick("DiagoCG", "calc_gamma_cg");
 }
 
 template <typename T, typename Device>
@@ -401,12 +455,17 @@ bool DiagoCG<T, Device>::update_psi(const ct::Tensor& pphi,
                                     ct::Tensor& sphi,
                                     ct::Tensor& hphi)
 {
+    ModuleBase::timer::tick("DiagoCG", "update_psi");
+    ModuleBase::timer::tick("DiagoCG", "update_norm");
     cg_norm = sqrt(ModuleBase::dot_real_op<T, Device>()(this->n_basis_, cg.data<T>(), scg.data<T>()));
+    ModuleBase::timer::tick("DiagoCG", "update_norm");
 
     if (cg_norm < 1.0e-10){
+        ModuleBase::timer::tick("DiagoCG", "update_psi");
         return true;
     }
 
+    ModuleBase::timer::tick("DiagoCG", "update_theta");
     const Real a0
         = ModuleBase::dot_real_op<T, Device>()(this->n_basis_, phi_m.data<T>(), pphi.data<T>()) * 2.0 / cg_norm;
     const Real b0
@@ -426,6 +485,7 @@ bool DiagoCG<T, Device>::update_psi(const ct::Tensor& pphi,
     }
 
     eigen = std::min(e1, e2);
+    ModuleBase::timer::tick("DiagoCG", "update_theta");
 
     const Real cost = cos(theta);
     const Real sint_norm = sin(theta) / cg_norm;
@@ -436,16 +496,19 @@ bool DiagoCG<T, Device>::update_psi(const ct::Tensor& pphi,
     // }
 
     // haozhihan replace this 2022-10-6
+    ModuleBase::timer::tick("DiagoCG", "update_phi");
     ModuleBase::vector_add_vector_op<T, Device>()(this->n_basis_,
                                                   phi_m.data<T>(),
                                                   phi_m.data<T>(),
                                                   cost,
                                                   cg.data<T>(),
                                                   sint_norm);
+    ModuleBase::timer::tick("DiagoCG", "update_phi");
 
     if (std::abs(eigen - e0) < ethreshold)
     {
         // ModuleBase::timer::tick("DiagoCG","update");
+        ModuleBase::timer::tick("DiagoCG", "update_psi");
         return true;
     }
     else
@@ -457,6 +520,7 @@ bool DiagoCG<T, Device>::update_psi(const ct::Tensor& pphi,
         // }
 
         // haozhihan replace this 2022-10-6
+        ModuleBase::timer::tick("DiagoCG", "update_sh");
         ModuleBase::vector_add_vector_op<T, Device>()(this->n_basis_,
                                                       sphi.data<T>(),
                                                       sphi.data<T>(),
@@ -469,6 +533,8 @@ bool DiagoCG<T, Device>::update_psi(const ct::Tensor& pphi,
                                                       cost,
                                                       pphi.data<T>(),
                                                       sint_norm);
+        ModuleBase::timer::tick("DiagoCG", "update_sh");
+        ModuleBase::timer::tick("DiagoCG", "update_psi");
         return false;
     }
 }
@@ -477,7 +543,7 @@ template <typename T, typename Device>
 void DiagoCG<T, Device>::schmit_orth(const int& m, const ct::Tensor& psi, const ct::Tensor& sphi, ct::Tensor& phi_m)
 {
     //	ModuleBase::TITLE("DiagoCG","schmit_orth");
-    // ModuleBase::timer::tick("DiagoCG","schmit_orth");
+    ModuleBase::timer::tick("DiagoCG","schmit_orth");
     // orthogonalize starting eigenfunction to those already calculated
     // phi_m orthogonalize to psi(start) ~ psi(m-1)
     // Attention, the orthogonalize here read as
@@ -491,6 +557,7 @@ void DiagoCG<T, Device>::schmit_orth(const int& m, const ct::Tensor& psi, const 
     //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     // haozhihan replace 2022-10-6
     int inc = 1;
+    ModuleBase::timer::tick("DiagoCG","schmit_lagrange");
     ModuleBase::gemv_op<T, Device>()('C',
                                      this->n_basis_,
                                      m + 1,
@@ -502,12 +569,16 @@ void DiagoCG<T, Device>::schmit_orth(const int& m, const ct::Tensor& psi, const 
                                      this->zero_,
                                      lagrange_so.data<T>(),
                                      inc);
+    ModuleBase::timer::tick("DiagoCG","schmit_lagrange");
 
     // be careful , here reduce m+1
+    ModuleBase::timer::tick("DiagoCG","schmit_reduce");
     Parallel_Reduce::reduce_pool(lagrange_so.data<T>(), m + 1);
+    ModuleBase::timer::tick("DiagoCG","schmit_reduce");
 
     //<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     // haozhihan replace 2022-10-6
+    ModuleBase::timer::tick("DiagoCG","schmit_project");
     ModuleBase::gemv_op<T, Device>()('N',
                                      this->n_basis_,
                                      m,
@@ -519,6 +590,7 @@ void DiagoCG<T, Device>::schmit_orth(const int& m, const ct::Tensor& psi, const 
                                      this->one_,
                                      phi_m.data<T>(),
                                      inc);
+    ModuleBase::timer::tick("DiagoCG","schmit_project");
 
     //======================================================================
     /*for (int j = 0; j < m; j++)
@@ -543,6 +615,7 @@ void DiagoCG<T, Device>::schmit_orth(const int& m, const ct::Tensor& psi, const 
         }
         std::cout << " in DiagoCG, psi norm = " << psi_norm << std::endl;
         std::cout << " If you use GNU compiler, it may due to the zdotc is unavailable." << std::endl;
+        ModuleBase::timer::tick("DiagoCG","schmit_orth");
         ModuleBase::WARNING_QUIT("schmit_orth", "psi_norm <= 0.0");
     }
 
@@ -556,9 +629,11 @@ void DiagoCG<T, Device>::schmit_orth(const int& m, const ct::Tensor& psi, const 
     // {
     //     pphi_m[ig] /= psi_norm;
     // }
+    ModuleBase::timer::tick("DiagoCG","schmit_normalize");
     ModuleBase::vector_mul_real_op<T, Device>()(this->n_basis_, phi_m.data<T>(), phi_m.data<T>(), Real(1.0 / psi_norm));
+    ModuleBase::timer::tick("DiagoCG","schmit_normalize");
 
-    // ModuleBase::timer::tick("DiagoCG","schmit_orth");
+    ModuleBase::timer::tick("DiagoCG","schmit_orth");
 }
 
 template <typename T, typename Device>

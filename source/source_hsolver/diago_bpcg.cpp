@@ -4,6 +4,7 @@
 #include "source_base/global_function.h"
 #include "source_base/kernels/math_kernel_op.h"
 #include "source_base/parallel_comm.h" // different MPI worlds
+#include "source_base/timer.h"
 #include "source_hsolver/kernels/bpcg_kernel_op.h"
 #include "para_linear_transform.h"
 
@@ -35,6 +36,7 @@ DiagoBPCG<T, Device>::~DiagoBPCG() {
 
 template<typename T, typename Device>
 void DiagoBPCG<T, Device>::init_iter(const int nband, const int nband_l, const int nbasis, const int ndim) {
+    ModuleBase::timer::tick("DiagoBPCG", "init_iter");
     // Specify the problem size n_basis, n_band, while lda is n_basis
     this->n_band        = nband;
     this->n_band_l      = nband_l;
@@ -64,11 +66,13 @@ void DiagoBPCG<T, Device>::init_iter(const int nband, const int nband_l, const i
     this->pmmcn.set_dimension(n_band_l, n_basis, n_band_l, n_basis, n_dim, n_band);
     this->plintrans.set_dimension(n_dim, nband_l, n_band_l, n_basis, false);
 #endif
+    ModuleBase::timer::tick("DiagoBPCG", "init_iter");
 }
 
 template<typename T, typename Device>
 bool DiagoBPCG<T, Device>::test_error(const ct::Tensor& err_in, const std::vector<double>& ethr_band)
 {
+    ModuleBase::timer::tick("DiagoBPCG", "test_error");
     Real* _err_st = err_in.data<Real>();
     bool not_conv = false;
     std::vector<Real> tmp_cpu;
@@ -78,16 +82,23 @@ bool DiagoBPCG<T, Device>::test_error(const ct::Tensor& err_in, const std::vecto
         // qianrui change it, because it can not pass the valgrind test
         tmp_cpu.resize(this->n_band_l);
         _err_st = tmp_cpu.data();
+        ModuleBase::timer::tick("DiagoBPCG", "test_error_d2h");
         syncmem_var_d2h_op()(_err_st, err_in.data<Real>(), this->n_band_l);
+        ModuleBase::timer::tick("DiagoBPCG", "test_error_d2h");
     }
+    ModuleBase::timer::tick("DiagoBPCG", "test_error_scan");
     for (int ii = 0; ii < this->n_band_l; ii++) {
         if (_err_st[ii] > ethr_band[ii]) {
             not_conv = true;
         }
     }
+    ModuleBase::timer::tick("DiagoBPCG", "test_error_scan");
 #ifdef __MPI
+    ModuleBase::timer::tick("DiagoBPCG", "test_error_reduce");
     MPI_Allreduce(MPI_IN_PLACE, &not_conv, 1, MPI_C_BOOL, MPI_LOR, BP_WORLD);
+    ModuleBase::timer::tick("DiagoBPCG", "test_error_reduce");
 #endif
+    ModuleBase::timer::tick("DiagoBPCG", "test_error");
     return not_conv;
 }
 
@@ -99,6 +110,7 @@ void DiagoBPCG<T, Device>::line_minimize(
     ct::Tensor& psi_out,
     ct::Tensor& hpsi_out)
 {
+    ModuleBase::timer::tick("DiagoBPCG", "line_minimize");
     line_minimize_with_block_op<T, Device>()(grad_in.data<T>(),
                                              hgrad_in.data<T>(),
                                              psi_out.data<T>(),
@@ -106,6 +118,7 @@ void DiagoBPCG<T, Device>::line_minimize(
                                              this->n_dim,
                                              this->n_basis,
                                              this->n_band_l);
+    ModuleBase::timer::tick("DiagoBPCG", "line_minimize");
 }
 
 
@@ -117,20 +130,32 @@ void DiagoBPCG<T, Device>::orth_cholesky(
 		ct::Tensor& hpsi_out,
 		ct::Tensor& hsub_out)
 {
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky");
     // gemm: hsub_out(n_band x n_band) = psi_out^T(n_band x n_basis) * psi_out(n_basis x n_band)
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky_gram");
     this->pmmcn.multiply(1.0, psi_out.data<T>(), psi_out.data<T>(), 0.0, hsub_out.data<T>());
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky_gram");
 
     // set hsub matrix to lower format;
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky_set");
     ct::kernels::set_matrix<T, ct_Device>()(
         'L', hsub_out.data<T>(), this->n_band);
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky_set");
 
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky_lapack");
     ct::kernels::lapack_potrf<T, ct_Device>()(
         'U', this->n_band, hsub_out.data<T>(), this->n_band);
     ct::kernels::lapack_trtri<T, ct_Device>()(
         'U', 'N', this->n_band, hsub_out.data<T>(), this->n_band);
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky_lapack");
 
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky_rotate_psi");
     this->rotate_wf(hsub_out, psi_out, workspace_in);
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky_rotate_psi");
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky_rotate_hpsi");
     this->rotate_wf(hsub_out, hpsi_out, workspace_in);
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky_rotate_hpsi");
+    ModuleBase::timer::tick("DiagoBPCG", "orth_cholesky");
 }
 
 template<typename T, typename Device>
@@ -143,6 +168,7 @@ void DiagoBPCG<T, Device>::calc_grad_with_block(
         ct::Tensor& grad_out,
         ct::Tensor& grad_old_out)
 {
+    ModuleBase::timer::tick("DiagoBPCG", "calc_grad_with_block");
     calc_grad_with_block_op<T, Device>()(prec_in.data<Real>(),
                                          err_out.data<Real>(),
                                          beta_out.data<Real>(),
@@ -153,12 +179,15 @@ void DiagoBPCG<T, Device>::calc_grad_with_block(
                                          this->n_dim,
                                          this->n_basis,
                                          this->n_band_l);
+    ModuleBase::timer::tick("DiagoBPCG", "calc_grad_with_block");
 }
 
 template<typename T, typename Device>
 void DiagoBPCG<T, Device>::calc_prec()
 {
+    ModuleBase::timer::tick("DiagoBPCG", "calc_prec");
     syncmem_var_h2d_op()(this->prec.template data<Real>(), this->h_prec.template data<Real>(), this->n_basis);
+    ModuleBase::timer::tick("DiagoBPCG", "calc_prec");
 }
 
 template<typename T, typename Device>
@@ -167,12 +196,18 @@ void DiagoBPCG<T, Device>::orth_projection(
         ct::Tensor& hsub_in,
         ct::Tensor& grad_out)
 {
+    ModuleBase::timer::tick("DiagoBPCG", "orth_projection");
     // gemm: hsub_in(n_band x n_band) = psi_in^T(n_band x n_basis) * grad_out(n_basis x n_band)
+    ModuleBase::timer::tick("DiagoBPCG", "orth_projection_gram");
     this->pmmcn.multiply(1.0, psi_in.data<T>(), grad_out.data<T>(), 0.0, hsub_in.data<T>());
+    ModuleBase::timer::tick("DiagoBPCG", "orth_projection_gram");
 
     // grad_out(n_basis x n_band) = 1.0 * grad_out(n_basis x n_band) - psi_in(n_basis x n_band) * hsub_in(n_band x
     // n_band)
+    ModuleBase::timer::tick("DiagoBPCG", "orth_projection_update");
     this->plintrans.act(-1.0, psi_in.data<T>(), hsub_in.data<T>(), 1.0, grad_out.data<T>());
+    ModuleBase::timer::tick("DiagoBPCG", "orth_projection_update");
+    ModuleBase::timer::tick("DiagoBPCG", "orth_projection");
     return;
 }
 
@@ -182,10 +217,16 @@ void DiagoBPCG<T, Device>::rotate_wf(
         ct::Tensor& psi_out,
         ct::Tensor& workspace_in)
 {
+    ModuleBase::timer::tick("DiagoBPCG", "rotate_wf");
     // gemm: workspace_in(n_basis x n_band) = psi_out(n_basis x n_band) * hsub_in(n_band x n_band)
+    ModuleBase::timer::tick("DiagoBPCG", "rotate_wf_gemm");
     this->plintrans.act(1.0, psi_out.data<T>(), hsub_in.data<T>(), 0.0, workspace_in.data<T>());
+    ModuleBase::timer::tick("DiagoBPCG", "rotate_wf_gemm");
+    ModuleBase::timer::tick("DiagoBPCG", "rotate_wf_copy");
     syncmem_complex_op()(psi_out.template data<T>(), workspace_in.template data<T>(), this->n_band_l * this->n_basis);
+    ModuleBase::timer::tick("DiagoBPCG", "rotate_wf_copy");
 
+    ModuleBase::timer::tick("DiagoBPCG", "rotate_wf");
     return;
 }
 
@@ -195,8 +236,10 @@ void DiagoBPCG<T, Device>::calc_hpsi_with_block(
         T *psi_in,
         ct::Tensor& hpsi_out)
 {
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hpsi_with_block");
     // calculate all-band hpsi
     hpsi_func(psi_in, hpsi_out.data<T>(), this->n_basis, this->n_band_l);
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hpsi_with_block");
 }
 
 template<typename T, typename Device>
@@ -206,12 +249,18 @@ void DiagoBPCG<T, Device>::diag_hsub(
         ct::Tensor& hsub_out,
         ct::Tensor& eigenvalue_out)
 {
+    ModuleBase::timer::tick("DiagoBPCG", "diag_hsub");
     // gemm: hsub_out(n_band x n_band) = hpsi_in^T(n_band x n_basis) * psi_in(n_basis x n_band)
+    ModuleBase::timer::tick("DiagoBPCG", "diag_hsub_gram");
     this->pmmcn.multiply(1.0, hpsi_in.data<T>(), psi_in.data<T>(), 0.0, hsub_out.data<T>());
+    ModuleBase::timer::tick("DiagoBPCG", "diag_hsub_gram");
 
     // ct::kernels::lapack_heevd<T, ct_Device>()('V', 'U', hsub_out.data<T>(), this->n_band, eigenvalue_out.data<Real>());
+    ModuleBase::timer::tick("DiagoBPCG", "diag_hsub_lapack");
     ct::kernels::lapack_heevd<T, ct_Device>()(this->n_band, hsub_out.data<T>(), this->n_band, eigenvalue_out.data<Real>());
+    ModuleBase::timer::tick("DiagoBPCG", "diag_hsub_lapack");
 
+    ModuleBase::timer::tick("DiagoBPCG", "diag_hsub");
     return;
 }
 
@@ -225,18 +274,28 @@ void DiagoBPCG<T, Device>::calc_hsub_with_block(
         ct::Tensor& workspace_in,
         ct::Tensor& eigenvalue_out)
 {
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_with_block");
     // Apply the H operator to psi and obtain the hpsi matrix.
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_hpsi");
     this->calc_hpsi_with_block(hpsi_func, psi_in, hpsi_out);
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_hpsi");
 
     // Diagonalization of the subspace matrix.
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_diag");
     this->diag_hsub(psi_out,hpsi_out, hsub_out, eigenvalue_out);
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_diag");
 
     // inplace matmul to get the initial guessed wavefunction psi.
     // psi_out[n_basis, n_band] = psi_out[n_basis, n_band] x hsub_out[n_band, n_band]
     // hpsi_out[n_basis, n_band] = psi_out[n_basis, n_band] x hsub_out[n_band, n_band]
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_rotate_psi");
     this->rotate_wf(hsub_out, psi_out, workspace_in);
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_rotate_psi");
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_rotate_hpsi");
     this->rotate_wf(hsub_out, hpsi_out, workspace_in);
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_rotate_hpsi");
 
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_with_block");
     return;
 }
 
@@ -248,13 +307,19 @@ void DiagoBPCG<T, Device>::calc_hsub_with_block_exit(
         ct::Tensor& workspace_in,
         ct::Tensor& eigenvalue_out)
 {
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_exit");
     // Diagonalization of the subspace matrix.
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_exit_diag");
     this->diag_hsub(psi_out, hpsi_out, hsub_out, eigenvalue_out);
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_exit_diag");
 
     // inplace matmul to get the initial guessed wavefunction psi.
     // psi_out[n_basis, n_band] = psi_out[n_basis, n_band] x hsub_out[n_band, n_band]
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_exit_rotate");
     this->rotate_wf(hsub_out, psi_out, workspace_in);
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_exit_rotate");
 
+    ModuleBase::timer::tick("DiagoBPCG", "calc_hsub_exit");
     return;
 }
 
@@ -264,9 +329,12 @@ void DiagoBPCG<T, Device>::diag(const HPsiFunc& hpsi_func,
                                 Real* eigenvalue_in,
                                 const std::vector<double>& ethr_band)
 {
+    ModuleBase::timer::tick("DiagoBPCG", "diag");
     const int current_scf_iter = hsolver::DiagoIterAssist<T, Device>::SCF_ITER;
     // Get the pointer of the input psi
+    ModuleBase::timer::tick("DiagoBPCG", "diag_map_psi");
     this->psi = std::move(ct::TensorMap(psi_in /*psi_in.get_pointer()*/, t_type, device_type, {this->n_band_l, this->n_basis}));
+    ModuleBase::timer::tick("DiagoBPCG", "diag_map_psi");
 
     // Update the precondition array
     this->calc_prec();
@@ -274,9 +342,11 @@ void DiagoBPCG<T, Device>::diag(const HPsiFunc& hpsi_func,
     // Improving the initial guess of the wave function psi through a subspace diagonalization.
     this->calc_hsub_with_block(hpsi_func, psi_in, this->psi, this->hpsi, this->hsub, this->work, this->eigen);
 
+    ModuleBase::timer::tick("DiagoBPCG", "diag_init_buffers");
     setmem_complex_op()(this->grad_old.template data<T>(), 0, this->n_basis * this->n_band_l);
 
     setmem_var_op()(this->beta.template data<Real>(), std::numeric_limits<Real>::infinity(), this->n_band_l);
+    ModuleBase::timer::tick("DiagoBPCG", "diag_init_buffers");
 
     int ntry = 0;
     int max_iter = current_scf_iter > 1 ?
@@ -300,10 +370,14 @@ void DiagoBPCG<T, Device>::diag(const HPsiFunc& hpsi_func,
         this->orth_projection(this->psi, this->hsub, this->grad);
 
         // this->grad_old = this->grad;
+        ModuleBase::timer::tick("DiagoBPCG", "copy_grad_old");
         syncmem_complex_op()(this->grad_old.template data<T>(), this->grad.template data<T>(), n_basis * n_band_l);
+        ModuleBase::timer::tick("DiagoBPCG", "copy_grad_old");
 
         // Calculate H|grad> matrix
+        ModuleBase::timer::tick("DiagoBPCG", "hpsi_grad");
         this->calc_hpsi_with_block(hpsi_func, this->grad.template data<T>(), /*this->grad_wrapper[0],*/ this->hgrad);
+        ModuleBase::timer::tick("DiagoBPCG", "hpsi_grad");
 
         // optimize psi as well as the hpsi
         // 1. normalize grad
@@ -315,7 +389,9 @@ void DiagoBPCG<T, Device>::diag(const HPsiFunc& hpsi_func,
         this->orth_cholesky(this->work, this->psi, this->hpsi, this->hsub);
 
         if (current_scf_iter == 1 && ntry % this->nline == 0) {
+            ModuleBase::timer::tick("DiagoBPCG", "periodic_subspace");
             this->calc_hsub_with_block(hpsi_func, psi_in, this->psi, this->hpsi, this->hsub, this->work, this->eigen);
+            ModuleBase::timer::tick("DiagoBPCG", "periodic_subspace");
         }
     } while (ntry < max_iter && this->test_error(this->err_st, ethr_band));
 
@@ -328,8 +404,11 @@ void DiagoBPCG<T, Device>::diag(const HPsiFunc& hpsi_func,
         start_nband = this->plintrans.start_colB[GlobalV::MY_BNDGROUP];
     }
 #endif
+    ModuleBase::timer::tick("DiagoBPCG", "sync_eigen");
     syncmem_var_d2h_op()(eigenvalue_in, this->eigen.template data<Real>() + start_nband, this->n_band_l);
+    ModuleBase::timer::tick("DiagoBPCG", "sync_eigen");
 
+    ModuleBase::timer::tick("DiagoBPCG", "diag");
     return;
 }
 
